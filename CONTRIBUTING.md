@@ -103,5 +103,6 @@ Pre-releases (`vX.Y.Z-rc.N`, `-alpha.N`) need steps 2 and 3 only. A version with
 dist-tag `next` and becomes a GitHub pre-release, never "latest".
 
 The Release workflow checks, builds, attaches `opencode-llm-quota.js` and the tarball, publishes to
-npm (needs the `NPM_TOKEN` secret), and copies the matching `CHANGELOG.md` section into the release
+npm through Trusted Publishing (an OIDC identity of this workflow, no npm token in the repository),
+and copies the matching `CHANGELOG.md` section into the release
 notes, falling back to generated notes when no section matches.
