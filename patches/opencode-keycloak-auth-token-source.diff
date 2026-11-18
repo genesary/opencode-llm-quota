@@ -1,0 +1,219 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 1fc7569..ca7807a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
+ 
++### Added
++
++- **Read-only token source for other plugins (OpenCode v1).** When the loader
++  runs, the plugin publishes `globalThis[Symbol.for("opencode-keycloak-auth/token-source@1")]`
++  = `{ version: 1, token(providerId) }`. `token()` resolves the provider's live
++  access token exactly like its own requests (single-flight refresh near expiry)
++  or returns `undefined`; it never throws, never starts a login and never exposes
++  the refresh token. Used by opencode-llm-quota. Not needed on OpenCode v2,
++  where `ctx.integration.connection` serves other plugins.
++
+ ## [1.0.0] - 2026-10-09
+ 
+ ### Added
+diff --git a/README.md b/README.md
+index c6dcd30..cf7d6b2 100644
+--- a/README.md
++++ b/README.md
+@@ -26,6 +26,7 @@ the provider validates (e.g. JWKS + claim policies).
+ - [Logging in](#logging-in)
+ - [Logging & diagnostics](#logging--diagnostics)
+ - [Troubleshooting](#troubleshooting)
++- [Sharing the token with other plugins](#sharing-the-token-with-other-plugins)
+ - [How it maps to the OpenCode plugin APIs](#how-it-maps-to-the-opencode-plugin-apis)
+ - [Contributing](#contributing)
+ - [Security](#security)
+@@ -507,6 +508,30 @@ re-run. Run with `OPENCODE_KC_LOG=debug` to trace the token refresh lifecycle.
+ **`Failed to fetch models.dev`.** Harmless — see the offline note in Install. Set
+ `OPENCODE_DISABLE_MODELS_FETCH=1` to silence it.
+ 
++## Sharing the token with other plugins
++
++Another plugin in the same OpenCode process (for example
++opencode-llm-quota, which
++shows the user's quotas on the gateway) can read the current access token
++without duplicating any OIDC logic:
++
++- **OpenCode v2**: through the host API, `ctx.integration.connection.active(<providerId>)`
++  then `ctx.integration.connection.resolve(connection)`. The host refreshes the
++  credential through this plugin's `refresh`.
++- **OpenCode v1**: through the token source this plugin publishes once its
++  loader has run:
++
++  ```ts
++  const source = globalThis[Symbol.for("opencode-keycloak-auth/token-source@1")];
++  const token = await source?.token("keycloak"); // string | undefined
++  ```
++
++  `token(providerId)` returns the live access token (refreshed when it is about
++  to expire, like the provider's own requests) or `undefined`: not logged in,
++  not an OAuth credential, or a failed refresh. It never throws, never starts a
++  login and never exposes the refresh token. The key is versioned: a breaking
++  change gets a new key.
++
+ ## How it maps to the OpenCode plugin APIs
+ 
+ **OpenCode v2** (`@opencode/plugin` 2.x, `setup(ctx)`; analysis in
+diff --git a/src/loader.ts b/src/loader.ts
+index e50ed1a..b298eeb 100644
+--- a/src/loader.ts
++++ b/src/loader.ts
+@@ -38,6 +38,7 @@ import { refreshTokens, type TokenSet } from "./keycloak.js";
+ import { RefreshFailedError, describe } from "./errors.js";
+ import { log } from "./log.js";
+ import type { KeycloakConfig } from "./config.js";
++import { publishTokenSource } from "./token-source.js";
+ 
+ type Loader = NonNullable<AuthHook["loader"]>;
+ 
+@@ -148,6 +149,10 @@ export function createLoader(config: KeycloakConfig, deps: LoaderDeps): Loader {
+     const initial = await resolveAccessToken(auth);
+     if (initial === null) return {};
+ 
++    // Read-only access to the same, live token for other plugins (e.g. a quota
++    // display); see token-source.ts. Same resolve as below: refresh included.
++    publishTokenSource(config.providerId, () => resolveAccessToken(auth));
++
+     // Injected into the SDK client and called by OpenCode on EVERY request, so
+     // the Bearer is re-resolved (and refreshed on expiry) per request rather than
+     // frozen at load time. This is what survives an overnight idle without a
+diff --git a/src/token-source.ts b/src/token-source.ts
+new file mode 100644
+index 0000000..792656f
+--- /dev/null
++++ b/src/token-source.ts
+@@ -0,0 +1,65 @@
++/**
++ * A read-only token source for other plugins in the same OpenCode process
++ * (OpenCode v1). OpenCode v1 gives plugins no way to read another provider's
++ * credentials, and this plugin must stay the only one that obtains and
++ * refreshes the Keycloak token; so it publishes, under a versioned key of the
++ * process-wide symbol registry:
++ *
++ *   globalThis[Symbol.for("opencode-keycloak-auth/token-source@1")] = {
++ *     version: 1,
++ *     token(providerId: string): Promise<string | undefined>,
++ *   }
++ *
++ * `token()` resolves the current access token of that provider exactly like the
++ * provider's own requests do (stored credentials, single-flight refresh near
++ * expiry), or `undefined` when there is none: not logged in, not an OAuth
++ * credential, or a failed refresh. It never throws, never starts a login and
++ * never exposes the refresh token. It is a symbol and not an import because the
++ * plugins ship as independent single-file bundles.
++ *
++ * On OpenCode v2 it is not needed: the host API
++ * (`ctx.integration.connection.active/resolve`) gives other plugins the
++ * connection, refreshed through this plugin's `refresh`.
++ */
++export const TOKEN_SOURCE_KEY = Symbol.for("opencode-keycloak-auth/token-source@1");
++
++export interface TokenSource {
++  readonly version: 1;
++  token(providerId: string): Promise<string | undefined>;
++}
++
++type Getter = () => Promise<string | null | undefined>;
++
++interface Registry extends TokenSource {
++  readonly providers: Map<string, Getter>;
++}
++
++function registry(scope: Record<PropertyKey, unknown>): Registry {
++  const existing = scope[TOKEN_SOURCE_KEY] as Registry | undefined;
++  if (existing?.version === 1 && existing.providers instanceof Map) return existing;
++  const providers = new Map<string, Getter>();
++  const created: Registry = {
++    version: 1,
++    providers,
++    async token(providerId) {
++      const get = providers.get(providerId);
++      if (!get) return undefined;
++      try {
++        return (await get()) ?? undefined;
++      } catch {
++        return undefined;
++      }
++    },
++  };
++  Object.defineProperty(scope, TOKEN_SOURCE_KEY, { value: created, configurable: true });
++  return created;
++}
++
++/** Publish (or replace) the token getter of `providerId`. */
++export function publishTokenSource(
++  providerId: string,
++  getter: Getter,
++  scope: Record<PropertyKey, unknown> = globalThis as Record<PropertyKey, unknown>,
++): void {
++  registry(scope).providers.set(providerId, getter);
++}
+diff --git a/test/token-source.test.ts b/test/token-source.test.ts
+new file mode 100644
+index 0000000..a49b3c1
+--- /dev/null
++++ b/test/token-source.test.ts
+@@ -0,0 +1,55 @@
++import { describe, expect, it, vi } from "vitest";
++import { createLoader } from "../src/loader.js";
++import { publishTokenSource, TOKEN_SOURCE_KEY, type TokenSource } from "../src/token-source.js";
++import { jsonFetch, testConfig } from "./helpers.js";
++
++const source = (scope: Record<PropertyKey, unknown>) => scope[TOKEN_SOURCE_KEY] as TokenSource;
++
++describe("token source for other plugins", () => {
++  it("is a versioned { version: 1, token(providerId) } object", async () => {
++    const scope: Record<PropertyKey, unknown> = {};
++    publishTokenSource("keycloak", async () => "jwt", scope);
++    expect(source(scope).version).toBe(1);
++    expect(await source(scope).token("keycloak")).toBe("jwt");
++    expect(await source(scope).token("other")).toBeUndefined();
++  });
++
++  it("never throws: a failing getter (refresh failed) gives undefined", async () => {
++    const scope: Record<PropertyKey, unknown> = {};
++    publishTokenSource(
++      "keycloak",
++      async () => {
++        throw new Error("invalid_grant");
++      },
++      scope,
++    );
++    expect(await source(scope).token("keycloak")).toBeUndefined();
++  });
++
++  it("is published by the loader, and resolves the live (refreshed) token", async () => {
++    const now = 1_000_000;
++    let stored = { type: "oauth" as const, access: "old", refresh: "r1", expires: now + 3_600_000 };
++    const auth = vi.fn(async () => stored);
++    const fetchImpl = jsonFetch([{ body: { access_token: "new", refresh_token: "r2", expires_in: 300 } }]);
++    const client = { auth: { set: vi.fn(async () => ({})) } };
++    const loader = createLoader(testConfig(), { client: client as never, fetchImpl, now: () => now });
++
++    await loader(auth as never, {} as never);
++    const published = (globalThis as Record<PropertyKey, unknown>)[TOKEN_SOURCE_KEY] as TokenSource;
++    expect(await published.token("keycloak")).toBe("old");
++
++    stored = { ...stored, expires: now + 1_000 }; // within the refresh leeway
++    expect(await published.token("keycloak")).toBe("new");
++    expect(fetchImpl.calls).toHaveLength(1);
++  });
++
++  it("is not published for a non-OAuth credential", async () => {
++    delete (globalThis as Record<PropertyKey, unknown>)[TOKEN_SOURCE_KEY];
++    const loader = createLoader(testConfig({ providerId: "api-key-provider" }), { client: {} as never });
++    await loader((async () => ({ type: "api", key: "sk" })) as never, {} as never);
++    const published = (globalThis as Record<PropertyKey, unknown>)[TOKEN_SOURCE_KEY] as
++      | TokenSource
++      | undefined;
++    expect(await published?.token("api-key-provider")).toBeUndefined();
++  });
++});

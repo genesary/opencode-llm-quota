@@ -1,0 +1,120 @@
+name: Release
+
+# On every version tag, build the plugin and attach a ready-to-use artifact to
+# the GitHub Release, so users need no local `npm install && npm run build`.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & publish plugin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check tag matches package.json version
+        run: |
+          PKG_VERSION="$(node -p 'require("./package.json").version')"
+          if [ "v${PKG_VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${PKG_VERSION}"
+            exit 1
+          fi
+
+      - name: Verify
+        run: |
+          npm run typecheck
+          npm run lint
+          npm run format:check
+          npm test
+
+      - name: Build plugin
+        run: npm run build
+
+      - name: Assemble release artifacts
+        run: |
+          # (1) Self-contained ESM bundle (server part), to drop straight into
+          #     ~/.config/opencode/plugins/ (OpenCode auto-loads it). Zero runtime deps.
+          cp dist/index.js opencode-llm-quota.js
+          # (2) Tarball with both parts (server and TUI), for `npm install ./*.tgz`.
+          npm pack
+
+      - name: Detect pre-release
+        id: channel
+        run: |
+          # A SemVer pre-release (v1.2.3-rc.1, v1.2.3-alpha.0…) must never become
+          # npm `latest` nor the GitHub "latest release" (the README downloads
+          # releases/latest/download/opencode-llm-quota.js).
+          if [[ "${GITHUB_REF_NAME#v}" == *-* ]]; then
+            echo "npm_tag=next" >> "$GITHUB_OUTPUT"
+            echo "gh_flags=--prerelease --latest=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "npm_tag=latest" >> "$GITHUB_OUTPUT"
+            echo "gh_flags=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ steps.channel.outputs.npm_tag }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Idempotent on workflow re-runs: skip if this version is already on npm.
+          if npm view "opencode-llm-quota@${VERSION}" version >/dev/null 2>&1; then
+            echo "opencode-llm-quota@${VERSION} already published, skipping."
+          else
+            npm publish opencode-llm-quota-${VERSION}.tgz --access public --tag "$NPM_TAG"
+          fi
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Grab the body of the "## [<version>]" section (up to the next "## [").
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { flag = 1; next }
+            flag && /^## \[/ { exit }
+            flag { print }
+          ' CHANGELOG.md | awk 'NF { started = 1 } started' > RELEASE_NOTES.md
+          if [ -s RELEASE_NOTES.md ]; then
+            echo "have_notes=true" >> "$GITHUB_OUTPUT"
+            echo "Release notes for $VERSION:"; cat RELEASE_NOTES.md
+          else
+            echo "have_notes=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No CHANGELOG section for $VERSION, falling back to auto-generated notes."
+          fi
+
+      - name: Create or update the release with the built plugin
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HAVE_NOTES: ${{ steps.notes.outputs.have_notes }}
+          GH_FLAGS: ${{ steps.channel.outputs.gh_flags }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ASSETS=(opencode-llm-quota.js opencode-llm-quota-*.tgz)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+            # Keep the description in sync with the CHANGELOG on re-runs.
+            if [ "$HAVE_NOTES" = "true" ]; then
+              gh release edit "$TAG" --notes-file RELEASE_NOTES.md
+            fi
+          elif [ "$HAVE_NOTES" = "true" ]; then
+            gh release create "$TAG" --title "$TAG" --notes-file RELEASE_NOTES.md $GH_FLAGS "${ASSETS[@]}"
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes $GH_FLAGS "${ASSETS[@]}"
+          fi

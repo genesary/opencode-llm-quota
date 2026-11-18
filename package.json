@@ -1,0 +1,83 @@
+{
+  "name": "opencode-llm-quota",
+  "version": "0.1.0",
+  "description": "OpenCode plugin: shows the user's quotas on the AI platform gateway (agentgateway /v1/quota), next to opencode-keycloak-auth.",
+  "type": "module",
+  "license": "MIT",
+  "author": "AyRickk (https://github.com/AyRickk)",
+  "homepage": "https://github.com/genesary/opencode-llm-quota#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/genesary/opencode-llm-quota.git"
+  },
+  "bugs": {
+    "url": "https://github.com/genesary/opencode-llm-quota/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "quota",
+    "rate-limit",
+    "agentgateway",
+    "keycloak"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "server.js",
+    "tui.js",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsup && node scripts/check-bundle.mjs",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.17.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@opencode-ai/plugin": "^1.17.11",
+    "@opencode/plugin": "2.0.25",
+    "@types/node": "^26.0.1",
+    "@typescript-eslint/eslint-plugin": "^8.62.0",
+    "@typescript-eslint/parser": "^8.62.0",
+    "eslint": "^10.5.0",
+    "prettier": "^3.8.4",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}
