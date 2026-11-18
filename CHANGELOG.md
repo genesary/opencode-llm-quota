@@ -6,6 +6,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Releases publish to npm through Trusted Publishing (OIDC) instead of an npm
+  token stored as a repository secret. Packages published this way carry a
+  provenance attestation.
+
 ## [0.1.0] - 2026-11-18
 
 ### Added

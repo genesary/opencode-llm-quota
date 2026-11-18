@@ -292,8 +292,8 @@ Covered by `test/service.test.ts` with a fake clock, and measured on real OpenCo
    minutes could be spaced out; not done, to stay with the requested pace.
 9. **Toast at start:** a user who starts at low priority, or above 80% of a cap, gets one toast at the first
    read. Deliberate, easy to drop.
-10. **Publication:** the npm name, the GitHub repository and the `NPM_TOKEN` secret are not created. Nothing
-    is pushed.
+10. **Publication:** `opencode-llm-quota` is published on npm from the Release workflow through Trusted
+    Publishing, with no npm token stored in the repository.
 11. **Your global OpenCode install does not start:** its binary has an invalid signature, so macOS kills it
     on launch (exit 137). A reinstall, or `codesign --force --sign -` on the binary, fixes it. The tests use
     their own copies in `.e2e/`.
